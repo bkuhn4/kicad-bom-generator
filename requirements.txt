@@ -1,0 +1,5 @@
+openpyxl>=3.1.0
+requests>=2.31.0
+digikey-api>=0.2.0
+mouser>=0.1.6
+six>=1.16.0
