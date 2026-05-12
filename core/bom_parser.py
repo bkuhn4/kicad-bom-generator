@@ -1,86 +1,129 @@
-from __future__ import annotations
-import csv
 import re
-from typing import List
+from itertools import groupby
+from pathlib import Path
+import pandas as pd
 
-from .models import BomRow, PackagingVariant
+
+def _strip_prefix(footprint: str) -> str:
+    return footprint.split(":", 1)[1] if ":" in footprint else footprint
 
 
-def format_references(ref_str: str) -> str:
-    """Collapse consecutive designator runs: C38,C39,C40 → C38-C40 (threshold: 3+)."""
-    if not ref_str:
-        return ""
+def _sort_refs(refs: list[str]) -> list[str]:
+    def key(r):
+        m = re.match(r"([A-Za-z]+)(\d+)", r.strip())
+        return (m.group(1), int(m.group(2))) if m else (r, 0)
+    return sorted(refs, key=key)
 
-    parts = [p.strip() for p in ref_str.split(",") if p.strip()]
 
-    parsed = []
-    for p in parts:
-        m = re.match(r"^([A-Za-z]+)(\d+)$", p)
-        parsed.append((m.group(1), int(m.group(2)), p) if m else (None, None, p))
-
-    result: List[str] = []
-    group: List[tuple] = []
-
-    def flush(g: List[tuple]) -> None:
-        if len(g) >= 3:
-            result.append(f"{g[0][2]}-{g[-1][2]}")
+def _compress_refs(refs: list[str]) -> str:
+    """Join refs with range compression: R1,R2,R3,R5 → 'R1-R3, R5'."""
+    parsed, non_std = [], []
+    for r in refs:
+        m = re.match(r"^([A-Za-z]+)(\d+)$", r.strip())
+        if m:
+            parsed.append((m.group(1), int(m.group(2))))
         else:
-            result.extend(x[2] for x in g)
+            non_std.append(r.strip())
 
-    for item in parsed:
-        if item[0] is None:
-            flush(group)
-            group = []
-            result.append(item[2])
-        elif not group or (item[0] == group[-1][0] and item[1] == group[-1][1] + 1):
-            group.append(item)
-        else:
-            flush(group)
-            group = [item]
+    result = []
+    for prefix, grp in groupby(sorted(parsed), key=lambda x: x[0]):
+        nums = sorted(n for _, n in grp)
+        start = end = nums[0]
+        for n in nums[1:]:
+            if n == end + 1:
+                end = n
+            else:
+                result.append(f"{prefix}{start}-{prefix}{end}" if end > start else f"{prefix}{start}")
+                start = end = n
+        result.append(f"{prefix}{start}-{prefix}{end}" if end > start else f"{prefix}{start}")
 
-    flush(group)
-    return ", ".join(result)
-
-
-def _get(row: dict, *keys: str) -> str:
-    for k in keys:
-        v = row.get(k, "").strip()
-        if v:
-            return v
-    return ""
+    return ", ".join(result + non_std)
 
 
-def parse_csv(path: str) -> List[BomRow]:
-    rows: List[BomRow] = []
-    with open(path, encoding="utf-8-sig", newline="") as f:
-        reader = csv.DictReader(f)
-        for csv_row in reader:
-            mf_pn = _get(csv_row,
-                         "Manufacturer PN", "MPN", "Manufacturer Part Number",
-                         "MF Part Number", "Part Number")
-            dk_pn_raw = _get(csv_row,
-                             "Digikey PN", "DigiKey PN", "Digi-Key PN",
-                             "Digikey", "DigiKey")
-            mouser_pn_raw = _get(csv_row, "Mouser PN", "Mouser")
+def parse_bom(filepath: str | Path, footprint_map: dict | None = None,
+              compress_refs: bool = True) -> list[dict]:
+    df = pd.read_csv(filepath)
+    df.columns = [c.strip() for c in df.columns]
 
-            bom_row = BomRow(
-                references=format_references(
-                    _get(csv_row, "Reference", "References", "Ref", "Designator")),
-                description=_get(csv_row, "Description", "Value", "Comment"),
-                package=_get(csv_row, "Package", "Footprint", "Case/Package"),
-                mf_part_number=mf_pn,
-                manufacturer=_get(csv_row, "Manufacturer", "Mfr", "Mfg"),
-                lcsc_pn=_get(csv_row, "LCSC PN", "LCSC"),
-                notes=_get(csv_row, "Notes", "Note"),
+    # Flexible column detection
+    rename = {}
+    for col in df.columns:
+        cl = col.lower().strip()
+        if "ref" in cl and "references" not in rename.values():
+            rename[col] = "references"
+        elif cl in ("qty", "quantity", "count") and "qty" not in rename.values():
+            rename[col] = "qty"
+        elif cl == "value" and "value" not in rename.values():
+            rename[col] = "value"
+        elif "foot" in cl and "footprint" not in rename.values():
+            rename[col] = "footprint"
+        # MPN: "Manufacturer PN", "MPN", "MFR PN", "Part Number" — must check before manufacturer
+        elif (cl in ("mpn", "manufacturer pn", "mfr pn", "mfr. pn", "part number", "part no")
+              or ("mpn" in cl)
+              or ("mfr" in cl and "pn" in cl)
+              or (("manufacturer" in cl or "manuf" in cl) and "pn" in cl)
+              ) and "mpn" not in rename.values():
+            rename[col] = "mpn"
+        elif ("manufacturer" in cl or cl in ("mfr", "mfr.")) and "manufacturer" not in rename.values():
+            rename[col] = "manufacturer"
+        elif ("digikey" in cl or "digi-key" in cl) and "pn" in cl and "digikey_pn" not in rename.values():
+            rename[col] = "digikey_pn"
+        elif "mouser" in cl and "pn" in cl and "mouser_pn" not in rename.values():
+            rename[col] = "mouser_pn"
+        elif "lcsc" in cl and "lcsc_pn" not in rename.values():
+            rename[col] = "lcsc_pn"
+        elif "description" in cl and "description" not in rename.values():
+            rename[col] = "description"
+
+    df = df.rename(columns=rename)
+
+    for req in ("references", "value", "footprint"):
+        if req not in df.columns:
+            raise ValueError(
+                f"Required column '{req}' not found. Detected columns: {list(df.columns)}"
             )
 
-            if dk_pn_raw:
-                bom_row.digikey_variants = [PackagingVariant("Cut Tape (CT)", dk_pn_raw)]
-                bom_row.digikey_selected_packaging = "Cut Tape (CT)"
+    def _apply_map(fp: str) -> str:
+        s = _strip_prefix(fp).strip()
+        if footprint_map:
+            return footprint_map.get(s, s)
+        return s
 
-            if mouser_pn_raw:
-                bom_row.mouser_variants = [PackagingVariant("Cut Tape", mouser_pn_raw)]
-                bom_row.mouser_selected_packaging = "Cut Tape"
+    df["footprint"] = df["footprint"].astype(str).apply(_apply_map)
+    df["value"] = df["value"].astype(str).str.strip()
 
-            rows.append(bom_row)
+    rows = []
+    for (value, footprint), grp in df.groupby(["value", "footprint"], sort=False):
+        all_refs = []
+        for cell in grp["references"].astype(str):
+            all_refs.extend(r.strip() for r in cell.split(",") if r.strip())
+
+        qty = int(grp["qty"].sum()) if "qty" in grp.columns else len(all_refs)
+
+        def _first(col):
+            if col in grp.columns:
+                v = grp[col].iloc[0]
+                return "" if pd.isna(v) else str(v).strip()
+            return ""
+
+        sorted_refs = _sort_refs(all_refs)
+        refs_str = _compress_refs(sorted_refs) if compress_refs else ", ".join(sorted_refs)
+        rows.append({
+            "references":   refs_str,
+            "qty":          qty,
+            "value":        value,
+            "footprint":    footprint,
+            "mpn":          _first("mpn"),
+            "manufacturer": _first("manufacturer"),
+            "packaging":    "Cut Tape",
+            "description":  _first("description"),
+            "stock":        "",
+            "digikey_pn":   _first("digikey_pn"),
+            "mouser_pn":    _first("mouser_pn"),
+            "lcsc_pn":      _first("lcsc_pn"),
+            "notes":        _first("notes"),
+            "status":       "red",
+            "status_reason": "",
+        })
+
     return rows

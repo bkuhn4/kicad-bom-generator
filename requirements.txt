@@ -1,5 +1,7 @@
+PyQt6>=6.4.0
+pandas>=2.0.0
 openpyxl>=3.1.0
-requests>=2.31.0
-digikey-api>=0.2.0
-mouser>=0.1.6
-six>=1.16.0
+requests>=2.28.0
+digikey-api>=0.1.0
+pyOpenSSL>=23.0.0
+cryptography>=41.0.0

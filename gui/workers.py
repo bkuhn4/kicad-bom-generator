@@ -26,7 +26,7 @@ class FetchAllWorker(QThread):
                     break
                 mpn = row.get("mpn", "").strip()
                 if not mpn:
-                    self.progress.emit(i, {"status": "red"})
+                    self.progress.emit(i, {"status": "red", "status_reason": "Missing MPN"})
                     continue
 
                 result = {}
@@ -35,7 +35,13 @@ class FetchAllWorker(QThread):
                 if self.dk.is_configured():
                     dk_data = self.dk.search_by_mpn(mpn, packaging)
                     if dk_data:
-                        result.update(dk_data)
+                        for k, v in dk_data.items():
+                            # Never overwrite the user's packaging selection from the API
+                            if k == "packaging":
+                                continue
+                            # Don't clobber an existing good value with an empty one
+                            if v != "" and v is not None:
+                                result[k] = v
 
                 if self.mu.is_configured():
                     mu_data = self.mu.search_by_mpn(mpn)
@@ -51,9 +57,24 @@ class FetchAllWorker(QThread):
                 stock = result.get("stock", 0)
                 has_dist = result.get("digikey_pn") or result.get("mouser_pn")
                 if has_dist:
-                    result["status"] = "green" if isinstance(stock, int) and stock > threshold else "yellow"
+                    if isinstance(stock, int) and stock > threshold:
+                        result["status"] = "green"
+                        result["status_reason"] = ""
+                    elif isinstance(stock, int) and stock == 0:
+                        result["status"] = "red"
+                        result["status_reason"] = "Out of stock"
+                    elif isinstance(stock, int):
+                        result["status"] = "yellow"
+                        result["status_reason"] = f"Low stock: {stock} units (threshold: {threshold})"
+                    else:
+                        result["status"] = "yellow"
+                        result["status_reason"] = "Stock unknown after fetch"
+                elif result:
+                    result["status"] = "yellow"
+                    result["status_reason"] = "No distributor PN returned by API"
                 else:
-                    result["status"] = "yellow" if result else "red"
+                    result["status"] = "red"
+                    result["status_reason"] = "Fetch returned no data"
 
                 self.progress.emit(i, result)
             self.finished.emit()
