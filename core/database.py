@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import sqlite3
 from pathlib import Path
 from datetime import datetime
@@ -54,7 +56,7 @@ def save_part(value: str, footprint: str, data: dict):
                 manufacturer=excluded.manufacturer,
                 digikey_pn=excluded.digikey_pn,
                 mouser_pn=excluded.mouser_pn,
-                lcsc_pn=excluded.lcsc_pn,
+                lcsc_pn=CASE WHEN excluded.lcsc_pn != '' THEN excluded.lcsc_pn ELSE lcsc_pn END,
                 description=excluded.description,
                 last_updated=excluded.last_updated
             """,
@@ -68,5 +70,21 @@ def save_part(value: str, footprint: str, data: dict):
                 data.get("description", ""),
                 now,
             ),
+        )
+        conn.commit()
+
+
+def save_lcsc_pn(value: str, footprint: str, lcsc_pn: str):
+    now = datetime.now().isoformat()
+    with _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO part_mappings (value, footprint, lcsc_pn, last_updated)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(value, footprint) DO UPDATE SET
+                lcsc_pn = excluded.lcsc_pn,
+                last_updated = excluded.last_updated
+            """,
+            (value, footprint, lcsc_pn, now),
         )
         conn.commit()

@@ -1,5 +1,10 @@
+from __future__ import annotations
+
 from PyQt6.QtCore import QThread, pyqtSignal
 from typing import Callable
+
+from core.database import save_part
+from core.status import recalc_status
 
 
 class FetchAllWorker(QThread):
@@ -24,7 +29,7 @@ class FetchAllWorker(QThread):
             for i, row in enumerate(self.rows):
                 if self._cancel:
                     break
-                mpn = row.get("mpn", "").strip()
+                mpn = (row.get("mpn") or "").strip()
                 if not mpn:
                     self.progress.emit(i, {"status": "red", "status_reason": "Missing MPN"})
                     continue
@@ -36,10 +41,8 @@ class FetchAllWorker(QThread):
                     dk_data = self.dk.search_by_mpn(mpn, packaging)
                     if dk_data:
                         for k, v in dk_data.items():
-                            # Never overwrite the user's packaging selection from the API
                             if k == "packaging":
                                 continue
-                            # Don't clobber an existing good value with an empty one
                             if v != "" and v is not None:
                                 result[k] = v
 
@@ -54,24 +57,17 @@ class FetchAllWorker(QThread):
                         if not result.get("manufacturer"):
                             result["manufacturer"] = mu_data.get("manufacturer", "")
 
-                stock = result.get("stock", 0)
-                has_dist = result.get("digikey_pn") or result.get("mouser_pn")
-                if has_dist:
-                    if isinstance(stock, int) and stock > threshold:
-                        result["status"] = "green"
-                        result["status_reason"] = ""
-                    elif isinstance(stock, int) and stock == 0:
-                        result["status"] = "red"
-                        result["status_reason"] = "Out of stock"
-                    elif isinstance(stock, int):
-                        result["status"] = "yellow"
-                        result["status_reason"] = f"Low stock: {stock} units (threshold: {threshold})"
-                    else:
-                        result["status"] = "yellow"
-                        result["status_reason"] = "Stock unknown after fetch"
-                elif result:
-                    result["status"] = "yellow"
-                    result["status_reason"] = "No distributor PN returned by API"
+                if result:
+                    # Apply status using the shared recalc_status helper
+                    merged = {**row, **result}
+                    recalc_status(merged, threshold)
+                    result["status"] = merged["status"]
+                    result["status_reason"] = merged["status_reason"]
+
+                    # Persist to part dictionary so next load auto-fills
+                    v, f = row.get("value", ""), row.get("footprint", "")
+                    if v and f:
+                        save_part(v, f, result)
                 else:
                     result["status"] = "red"
                     result["status_reason"] = "Fetch returned no data"
@@ -84,7 +80,7 @@ class FetchAllWorker(QThread):
 
 class TestApiWorker(QThread):
     """Runs a single test_connection() call off the main thread."""
-    done = pyqtSignal(bool, str)  # success, message
+    done = pyqtSignal(bool, str)
 
     def __init__(self, test_fn: Callable):
         super().__init__()

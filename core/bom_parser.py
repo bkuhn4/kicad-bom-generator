@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import re
 from itertools import groupby
 from pathlib import Path
@@ -13,6 +15,16 @@ def _sort_refs(refs: list[str]) -> list[str]:
         m = re.match(r"([A-Za-z]+)(\d+)", r.strip())
         return (m.group(1), int(m.group(2))) if m else (r, 0)
     return sorted(refs, key=key)
+
+
+def _expand_ref(ref: str) -> list[str]:
+    """Expand a compressed range like 'R1-R4' into ['R1','R2','R3','R4']."""
+    m = re.match(r"^([A-Za-z]+)(\d+)-(?:[A-Za-z]+)?(\d+)$", ref.strip())
+    if m:
+        prefix, start, end = m.group(1), int(m.group(2)), int(m.group(3))
+        if start <= end:
+            return [f"{prefix}{n}" for n in range(start, end + 1)]
+    return [ref]
 
 
 def _compress_refs(refs: list[str]) -> str:
@@ -40,8 +52,18 @@ def _compress_refs(refs: list[str]) -> str:
     return ", ".join(result + non_std)
 
 
+def expand_refs_string(refs_str: str) -> list[str]:
+    """Expand a comma-separated (possibly range-compressed) refs string to individual refs."""
+    result = []
+    for r in refs_str.split(","):
+        r = r.strip()
+        if r:
+            result.extend(_expand_ref(r))
+    return result
+
+
 def parse_bom(filepath: str | Path, footprint_map: dict | None = None,
-              compress_refs: bool = True) -> list[dict]:
+              compress_refs: bool = True, default_packaging: str = "Cut Tape") -> list[dict]:
     df = pd.read_csv(filepath)
     df.columns = [c.strip() for c in df.columns]
 
@@ -74,6 +96,10 @@ def parse_bom(filepath: str | Path, footprint_map: dict | None = None,
             rename[col] = "lcsc_pn"
         elif "description" in cl and "description" not in rename.values():
             rename[col] = "description"
+        elif cl == "packaging" and "packaging" not in rename.values():
+            rename[col] = "packaging"
+        elif cl == "notes" and "notes" not in rename.values():
+            rename[col] = "notes"
 
     df = df.rename(columns=rename)
 
@@ -96,7 +122,10 @@ def parse_bom(filepath: str | Path, footprint_map: dict | None = None,
     for (value, footprint), grp in df.groupby(["value", "footprint"], sort=False):
         all_refs = []
         for cell in grp["references"].astype(str):
-            all_refs.extend(r.strip() for r in cell.split(",") if r.strip())
+            for r in cell.split(","):
+                r = r.strip()
+                if r:
+                    all_refs.extend(_expand_ref(r))
 
         qty = int(grp["qty"].sum()) if "qty" in grp.columns else len(all_refs)
 
@@ -110,12 +139,13 @@ def parse_bom(filepath: str | Path, footprint_map: dict | None = None,
         refs_str = _compress_refs(sorted_refs) if compress_refs else ", ".join(sorted_refs)
         rows.append({
             "references":   refs_str,
+            "_raw_refs":    sorted_refs,
             "qty":          qty,
             "value":        value,
             "footprint":    footprint,
             "mpn":          _first("mpn"),
             "manufacturer": _first("manufacturer"),
-            "packaging":    "Cut Tape",
+            "packaging":    _first("packaging") or default_packaging,
             "description":  _first("description"),
             "stock":        "",
             "digikey_pn":   _first("digikey_pn"),

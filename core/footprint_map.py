@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-_MAP_PATH = Path.home() / ".kicad_bom_enhancer" / "footprint_map.json"
+_MAP_PATH = Path(__file__).resolve().parent.parent / "footprint_map.json"
 
 
 def load_footprint_map() -> dict:

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from pathlib import Path
 
 from PyQt6.QtWidgets import (
@@ -10,10 +12,11 @@ from PyQt6.QtCore import QModelIndex, QUrl, Qt
 from PyQt6.QtGui import QAction, QDesktopServices
 
 from core.config_manager import load_config, save_config
-from core.database import init_db, lookup_part, save_part
-from core.bom_parser import parse_bom
+from core.database import init_db, lookup_part, save_part, save_lcsc_pn
+from core.bom_parser import parse_bom, expand_refs_string, _sort_refs, _compress_refs
 from core.exporter import export_bom, export_csv, EXPORT_COLUMNS
 from core.footprint_map import load_footprint_map, save_footprint_map
+from core.status import recalc_status
 from api.digikey import DigiKeyClient
 from api.mouser import MouserClient
 from gui.bom_table import BomTableModel, PackagingDelegate, COLUMNS
@@ -39,6 +42,7 @@ class MainWindow(QMainWindow):
         self._fetch_worker: FetchAllWorker | None = None
         self._single_workers: list[FetchAllWorker] = []
         self._recent_actions: list[QAction] = []
+        self._file_recent_actions: list[QAction] = []
         self._current_csv_path: str | None = None
 
         self._build_ui()
@@ -143,9 +147,8 @@ class MainWindow(QMainWindow):
 
         fm = mb.addMenu("File")
         self._add_action(fm, "Import CSV…", self._browse_bom, "Ctrl+O")
-        self._import_menu = fm.addMenu("Open Recent")
-        self._recent_sep = self._import_menu.addSeparator()
-        self._refresh_recent_menu()
+        self._file_recent_menu = fm.addMenu("Open Recent")
+        self._file_recent_sep = self._file_recent_menu.addSeparator()
         fm.addSeparator()
         self._add_action(fm, "Save", self._save_csv, "Ctrl+S")
         self._add_action(fm, "Save As…", self._save_csv_as, "Ctrl+Shift+S")
@@ -174,7 +177,6 @@ class MainWindow(QMainWindow):
         tb.setMovable(False)
         self.addToolBar(tb)
 
-        # ── Import BOM with recent-files dropdown ──────────────────────────
         self._import_btn = QToolButton()
         self._import_btn.setText("Import BOM")
         self._import_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
@@ -191,7 +193,6 @@ class MainWindow(QMainWindow):
 
         self._import_btn.setMenu(self._import_menu)
         self._import_btn.setDefaultAction(browse_act)
-        # Override: clicking the label itself also opens the file dialog
         self._import_btn.clicked.connect(self._browse_bom)
 
         tb.addWidget(self._import_btn)
@@ -232,20 +233,32 @@ class MainWindow(QMainWindow):
     def _refresh_recent_menu(self):
         for act in self._recent_actions:
             self._import_menu.removeAction(act)
+        for act in self._file_recent_actions:
+            self._file_recent_menu.removeAction(act)
         self._recent_actions = []
+        self._file_recent_actions = []
 
         recent = self.config.get("recent_files", [])
         if recent:
             self._recent_sep.setVisible(True)
+            self._file_recent_sep.setVisible(True)
             for path in recent:
                 label = Path(path).name
-                act = QAction(label, self)
-                act.setToolTip(path)
-                act.triggered.connect(lambda _, p=path: self._load_bom(p))
-                self._import_menu.addAction(act)
-                self._recent_actions.append(act)
+
+                tb_act = QAction(label, self)
+                tb_act.setToolTip(path)
+                tb_act.triggered.connect(lambda _, p=path: self._load_bom(p))
+                self._import_menu.addAction(tb_act)
+                self._recent_actions.append(tb_act)
+
+                fm_act = QAction(label, self)
+                fm_act.setToolTip(path)
+                fm_act.triggered.connect(lambda _, p=path: self._load_bom(p))
+                self._file_recent_menu.addAction(fm_act)
+                self._file_recent_actions.append(fm_act)
         else:
             self._recent_sep.setVisible(False)
+            self._file_recent_sep.setVisible(False)
 
     def _add_recent(self, path: str):
         recent: list = self.config.get("recent_files", [])
@@ -284,16 +297,26 @@ class MainWindow(QMainWindow):
             self._refresh_recent_menu()
             return
         try:
-            fp_map = self._footprint_map if self.config.get("use_footprint_aliases", True) else None
-            rows = parse_bom(path, footprint_map=fp_map,
-                             compress_refs=self.config.get("compress_references", True))
+            use_aliases = self.config.get("use_footprint_aliases", True)
+            if use_aliases:
+                fp_map = self._footprint_map
+            else:
+                fp_map = {v: k for k, v in self._footprint_map.items()} if self._footprint_map else None
+
+            rows = parse_bom(
+                path,
+                footprint_map=fp_map,
+                compress_refs=self.config.get("compress_references", True),
+                default_packaging=self.config.get("default_packaging", "Cut Tape"),
+            )
+            threshold = self.config.get("low_stock_threshold", 10)
             for row in rows:
                 match = lookup_part(row["value"], row["footprint"])
                 if match:
                     for key in ("mpn", "manufacturer", "digikey_pn", "mouser_pn", "lcsc_pn", "description"):
                         if not row.get(key):
                             row[key] = match.get(key, "")
-                _recalc_status(row, self.config.get("low_stock_threshold", 10))
+                recalc_status(row, threshold)
             self.model.set_rows(rows)
             self._current_csv_path = path
             self._add_recent(path)
@@ -368,6 +391,57 @@ class MainWindow(QMainWindow):
 
     def _on_key_cell_edited(self, row_idx: int, key: str):
         row = self.model.get_row(row_idx)
+        threshold = self.config.get("low_stock_threshold", 10)
+
+        if key == "lcsc_pn":
+            lcsc = (row.get("lcsc_pn") or "").strip()
+            if lcsc and row.get("value") and row.get("footprint"):
+                save_lcsc_pn(row["value"], row["footprint"], lcsc)
+                self._status.showMessage(f"Row {row_idx + 1}: LCSC PN saved to Part Dictionary.")
+            return
+
+        if key in ("mpn", "digikey_pn", "mouser_pn"):
+            recalc_status(row, threshold)
+            self.model.update_row(row_idx, {
+                "status": row["status"],
+                "status_reason": row.get("status_reason", ""),
+            })
+            return
+
+        if key == "references":
+            raw = expand_refs_string(row.get("references", ""))
+            raw = _sort_refs(raw)
+            self.model._rows[row_idx]["_raw_refs"] = raw
+            ref_count = len(raw)
+            try:
+                qty_val = int(row.get("qty", 0))
+            except (ValueError, TypeError):
+                qty_val = 0
+            if qty_val != ref_count:
+                QMessageBox.warning(
+                    self, "Quantity Mismatch",
+                    f"References contain {ref_count} component(s) but Quantity is {qty_val}.\n"
+                    "Update the Quantity to match, or correct the References.",
+                )
+            return
+
+        if key == "qty":
+            raw = self.model._rows[row_idx].get("_raw_refs") or \
+                  expand_refs_string(row.get("references", ""))
+            ref_count = len(raw)
+            try:
+                qty_val = int(row.get("qty", 0))
+            except (ValueError, TypeError):
+                qty_val = 0
+            if qty_val != ref_count:
+                QMessageBox.warning(
+                    self, "Quantity Mismatch",
+                    f"Quantity set to {qty_val} but References contain {ref_count} component(s).\n"
+                    "Update the References to match, or correct the Quantity.",
+                )
+            return
+
+        # "value" edit — look up new value+footprint combo in DB and auto-fill
         match = lookup_part(row.get("value", ""), row.get("footprint", ""))
         if match:
             update = {}
@@ -376,7 +450,7 @@ class MainWindow(QMainWindow):
                     update[k] = match[k]
             if update:
                 row.update(update)
-                _recalc_status(row, self.config.get("low_stock_threshold", 10))
+                recalc_status(row, threshold)
                 update["status"] = row["status"]
                 update["status_reason"] = row.get("status_reason", "")
                 self.model.update_row(row_idx, update)
@@ -406,7 +480,6 @@ class MainWindow(QMainWindow):
     def _on_footprint_edited(self, row_idx: int, old_fp: str, new_fp: str):
         if old_fp == new_fp or not old_fp or not new_fp:
             return
-        # Already mapped exactly this way — nothing to ask
         if self._footprint_map.get(old_fp) == new_fp:
             return
 
@@ -425,7 +498,6 @@ class MainWindow(QMainWindow):
         if msg.clickedButton() == always_btn:
             self._footprint_map[old_fp] = new_fp
             save_footprint_map(self._footprint_map)
-            # Update every other row that still has the old footprint
             rows = self.model.get_all_rows()
             for i, row in enumerate(rows):
                 if i != row_idx and row.get("footprint") == old_fp:
@@ -441,7 +513,7 @@ class MainWindow(QMainWindow):
         if 0 <= index.column() < len(COLUMNS):
             if COLUMNS[index.column()][0] == "packaging":
                 return
-                
+
         row_idx = index.row()
         row = self.model.get_row(row_idx)
         dlg = SearchAssignDialog(row, self._dk, self._mu, save_part, self)
@@ -456,7 +528,7 @@ class MainWindow(QMainWindow):
                 "stock":        result.get("stock", ""),
             }
             merged = {**row, **update}
-            _recalc_status(merged, self.config.get("low_stock_threshold", 10))
+            recalc_status(merged, self.config.get("low_stock_threshold", 10))
             update["status"] = merged["status"]
             update["status_reason"] = merged.get("status_reason", "")
             self.model.update_row(row_idx, update)
@@ -465,7 +537,7 @@ class MainWindow(QMainWindow):
         if not self._current_csv_path:
             self._save_csv_as()
             return
-        
+
         rows = self.model.get_all_rows()
         if not rows:
             QMessageBox.information(self, "No Data", "Nothing to save.")
@@ -508,8 +580,16 @@ class MainWindow(QMainWindow):
         if not path:
             return
         try:
-            header_color = self.config.get("export", {}).get("header_color", "4F6228")
-            export_bom(rows, path, header_color=header_color, columns=self._get_export_columns())
+            exp = self.config.get("export", {})
+            export_bom(
+                rows, path,
+                header_color=exp.get("header_color", "4F6228"),
+                columns=self._get_export_columns(),
+                project_name=exp.get("project_name", ""),
+                revision=exp.get("revision", ""),
+                show_title=exp.get("show_title", True),
+                show_footer=exp.get("show_footer", True),
+            )
             self._status.showMessage(f"Exported → {path}")
             QMessageBox.information(self, "Export Complete", f"Saved to:\n{path}")
         except Exception as e:
@@ -518,11 +598,15 @@ class MainWindow(QMainWindow):
     def _open_settings(self):
         dlg = SettingsDialog(self.config, self)
         if dlg.exec() == SettingsDialog.DialogCode.Accepted:
+            old_compress = self.config.get("compress_references", True)
             self.config.update(dlg.get_config())
             save_config(self.config)
             self._dk = DigiKeyClient(self.config)
             self._mu = MouserClient(self.config)
             self._apply_column_visibility()
+            new_compress = self.config.get("compress_references", True)
+            if new_compress != old_compress:
+                self._toggle_compress_references(new_compress)
             self._status.showMessage("Settings saved.")
 
     def _open_footprint_aliases(self):
@@ -548,8 +632,8 @@ class MainWindow(QMainWindow):
         self._issues_table.setRowCount(len(rows))
         for ri, row in enumerate(rows):
             status = row.get("status", "red")
-            refs_item  = QTableWidgetItem(row.get("references", ""))
-            sym_item   = QTableWidgetItem(_STATUS_SYMBOL.get(status, "○"))
+            refs_item   = QTableWidgetItem(row.get("references", ""))
+            sym_item    = QTableWidgetItem(_STATUS_SYMBOL.get(status, "○"))
             reason_item = QTableWidgetItem(row.get("status_reason", ""))
             sym_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             for item in (refs_item, sym_item, reason_item):
@@ -562,9 +646,35 @@ class MainWindow(QMainWindow):
         arrow = "▼" if self._issues_toggle.isChecked() else "▶"
         self._issues_toggle.setText(f"{arrow}  Issues ({n})")
 
-    def _on_use_footprint_aliases_toggled(self, checked: bool):
+    def _apply_footprint_alias_toggle(self, checked: bool):
         self.config["use_footprint_aliases"] = checked
         save_config(self.config)
+
+        self._use_fp_action.blockSignals(True)
+        self._use_fp_action.setChecked(checked)
+        self._use_fp_action.blockSignals(False)
+
+        if not self._footprint_map:
+            return
+
+        fp_map = self._footprint_map if checked else {v: k for k, v in self._footprint_map.items()}
+        changed = False
+        for row in self.model._rows:
+            fp = row.get("footprint", "")
+            new_fp = fp_map.get(fp)
+            if new_fp and new_fp != fp:
+                row["footprint"] = new_fp
+                changed = True
+
+        if changed:
+            row_count = self.model.rowCount()
+            self.model.dataChanged.emit(
+                self.model.index(0, 0),
+                self.model.index(row_count - 1, len(COLUMNS) - 1),
+            )
+
+    def _on_use_footprint_aliases_toggled(self, checked: bool):
+        self._apply_footprint_alias_toggle(checked)
 
     # ── column management ─────────────────────────────────────────────────────
 
@@ -592,7 +702,7 @@ class MainWindow(QMainWindow):
         self._save_column_order()
 
     def _get_export_columns(self) -> list[tuple]:
-        """Columns in current visual order, skipping hidden and excluded ones."""
+        """Columns in current visual order, skipping hidden and export-excluded ones."""
         hdr = self.view.horizontalHeader()
         col_cfg = self.config.get("columns", {})
         result = []
@@ -630,7 +740,21 @@ class MainWindow(QMainWindow):
         )
         menu.addAction(hide_act)
 
-        exclude_act = QAction("Exclude from BOM", self)
+        if key == "references":
+            compress_act = QAction("Compress References", self)
+            compress_act.setCheckable(True)
+            compress_act.setChecked(self.config.get("compress_references", True))
+            compress_act.triggered.connect(self._toggle_compress_references)
+            menu.addAction(compress_act)
+
+        if key == "footprint":
+            fp_alias_act = QAction("Use Footprint Aliases", self)
+            fp_alias_act.setCheckable(True)
+            fp_alias_act.setChecked(self.config.get("use_footprint_aliases", True))
+            fp_alias_act.triggered.connect(self._apply_footprint_alias_toggle)
+            menu.addAction(fp_alias_act)
+
+        exclude_act = QAction("Exclude from Export", self)
         exclude_act.setCheckable(True)
         exclude_act.setChecked(is_excluded)
         exclude_act.triggered.connect(
@@ -655,6 +779,20 @@ class MainWindow(QMainWindow):
         self.config.setdefault("columns", {}).setdefault(key, {})["show"] = show
         save_config(self.config)
 
+    def _toggle_compress_references(self, checked: bool):
+        self.config["compress_references"] = checked
+        save_config(self.config)
+        for row in self.model._rows:
+            raw = row.get("_raw_refs", [])
+            if raw:
+                row["references"] = _compress_refs(raw) if checked else ", ".join(raw)
+        row_count = self.model.rowCount()
+        if row_count:
+            self.model.dataChanged.emit(
+                self.model.index(0, 0),
+                self.model.index(row_count - 1, len(COLUMNS) - 1),
+            )
+
     def _col_set_export(self, key: str, export: bool):
         self.config.setdefault("columns", {}).setdefault(key, {})["export"] = export
         save_config(self.config)
@@ -664,30 +802,3 @@ class MainWindow(QMainWindow):
 
     def _autofit_all_columns(self):
         self.view.resizeColumnsToContents()
-
-
-# ── helpers ───────────────────────────────────────────────────────────────────
-
-def _recalc_status(row: dict, threshold: int):
-    if not row.get("mpn", "").strip():
-        row["status"] = "red"
-        row["status_reason"] = "Missing MPN"
-        return
-    has_dist = row.get("digikey_pn") or row.get("mouser_pn")
-    if not has_dist:
-        row["status"] = "yellow"
-        row["status_reason"] = "No distributor PN found"
-        return
-    stock = row.get("stock", 0)
-    if isinstance(stock, int) and stock > threshold:
-        row["status"] = "green"
-        row["status_reason"] = ""
-    elif isinstance(stock, int) and stock == 0:
-        row["status"] = "red"
-        row["status_reason"] = "Out of stock"
-    elif isinstance(stock, int):
-        row["status"] = "yellow"
-        row["status_reason"] = f"Low stock: {stock} units (threshold: {threshold})"
-    else:
-        row["status"] = "yellow"
-        row["status_reason"] = "Stock not yet checked"

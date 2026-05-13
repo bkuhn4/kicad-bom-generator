@@ -154,8 +154,26 @@ class SettingsDialog(QDialog):
         inner = QWidget()
         layout = QVBoxLayout(inner)
 
-        # ── header color ──────────────────────────────────────────────────────
         exp = cfg.get("export", {})
+
+        # ── project info ──────────────────────────────────────────────────────
+        proj_grp = QGroupBox("Project Info")
+        proj_form = QFormLayout(proj_grp)
+        self.project_name = QLineEdit(exp.get("project_name", ""))
+        self.project_name.setPlaceholderText("e.g. Motor Controller Board")
+        self.revision = QLineEdit(exp.get("revision", ""))
+        self.revision.setPlaceholderText("e.g. 1.0")
+        self.show_title_cb = QCheckBox("Include title and revision in header")
+        self.show_title_cb.setChecked(exp.get("show_title", True))
+        self.show_footer_cb = QCheckBox("Include date/time in footer  (Created: …)")
+        self.show_footer_cb.setChecked(exp.get("show_footer", True))
+        proj_form.addRow("Project Name:", self.project_name)
+        proj_form.addRow("Revision:", self.revision)
+        proj_form.addRow(self.show_title_cb)
+        proj_form.addRow(self.show_footer_cb)
+        layout.addWidget(proj_grp)
+
+        # ── header color ──────────────────────────────────────────────────────
         current_color = exp.get("header_color", "4F6228")
 
         style_grp = QGroupBox("Table Style")
@@ -366,7 +384,13 @@ class SettingsDialog(QDialog):
                 "sandbox":       self.dk_sandbox.isChecked(),
             },
             "mouser": {"api_key": self.mu_key.text().strip()},
-            "export": {"header_color": self.color_swatch.get_color()},
+            "export": {
+                "header_color": self.color_swatch.get_color(),
+                "project_name": self.project_name.text().strip(),
+                "revision":     self.revision.text().strip(),
+                "show_title":   self.show_title_cb.isChecked(),
+                "show_footer":  self.show_footer_cb.isChecked(),
+            },
             "default_packaging":   self.default_pkg.currentText(),
             "low_stock_threshold": self.low_stock.value(),
             "compress_references": self.compress_refs.isChecked(),

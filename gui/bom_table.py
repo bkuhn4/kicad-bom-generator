@@ -35,14 +35,19 @@ _STATUS_FG = {
 }
 _STATUS_SYMBOL = {"green": "●", "yellow": "◑", "red": "○"}
 
-# value + footprint are editable so users can normalise names (e.g. C_0805_2012Metric → C0805)
-# and have those drive Part Dictionary lookups.
-_EDITABLE = {"value", "footprint", "mpn", "manufacturer", "digikey_pn", "mouser_pn", "lcsc_pn", "notes", "packaging"}
+_EDITABLE = {
+    "qty", "references",
+    "value", "footprint", "mpn", "manufacturer",
+    "digikey_pn", "mouser_pn", "lcsc_pn", "notes", "packaging",
+}
+
+# Keys whose edits should trigger a part-dictionary lookup / status recalc
+_KEY_CELL_SIGNAL_KEYS = {"value", "lcsc_pn", "mpn", "digikey_pn", "mouser_pn", "qty", "references"}
 
 
 class BomTableModel(QAbstractTableModel):
     packaging_changed = pyqtSignal(int, str)
-    key_cell_edited = pyqtSignal(int, str)        # row_idx, column_key  (value edits)
+    key_cell_edited = pyqtSignal(int, str)        # row_idx, column_key
     footprint_edited = pyqtSignal(int, str, str)  # row_idx, old_fp, new_fp
 
     def __init__(self):
@@ -71,7 +76,7 @@ class BomTableModel(QAbstractTableModel):
             if key == "status":
                 return _STATUS_SYMBOL.get(status, "○")
             v = row.get(key, "")
-            return str(v) if v != "" else ""
+            return str(v) if v not in ("", None) else ""
 
         if role == Qt.ItemDataRole.BackgroundRole:
             return QBrush(_STATUS_BG.get(status, QColor("white")))
@@ -105,13 +110,15 @@ class BomTableModel(QAbstractTableModel):
             return False
         key = _COL_KEYS[index.column()]
         old_value = str(self._rows[index.row()].get(key, ""))
+        if isinstance(value, str):
+            value = value.strip()
         self._rows[index.row()][key] = value
         self.dataChanged.emit(index, index)
         if key == "packaging":
             self.packaging_changed.emit(index.row(), value)
         elif key == "footprint":
             self.footprint_edited.emit(index.row(), old_value, value)
-        elif key == "value":
+        elif key in _KEY_CELL_SIGNAL_KEYS:
             self.key_cell_edited.emit(index.row(), key)
         return True
 
@@ -125,7 +132,9 @@ class BomTableModel(QAbstractTableModel):
     def update_row(self, row_idx: int, data: dict):
         if not (0 <= row_idx < len(self._rows)):
             return
-        self._rows[row_idx].update(data)
+        self._rows[row_idx].update(
+            {k: ("" if v is None else v) for k, v in data.items()}
+        )
         tl = self.index(row_idx, 0)
         br = self.index(row_idx, len(COLUMNS) - 1)
         self.dataChanged.emit(tl, br)

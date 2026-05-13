@@ -1,5 +1,7 @@
+from __future__ import annotations
+
 from PyQt6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QPushButton,
+    QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QLineEdit,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
     QMessageBox,
 )
@@ -16,6 +18,12 @@ class FootprintAliasDialog(QDialog):
         self._bom_footprints = bom_footprints or []
 
         layout = QVBoxLayout(self)
+
+        self._search = QLineEdit()
+        self._search.setPlaceholderText("Filter aliases…")
+        self._search.setClearButtonEnabled(True)
+        self._search.textChanged.connect(self._filter_rows)
+        layout.addWidget(self._search)
 
         self._table = QTableWidget(0, 2)
         self._table.setHorizontalHeaderLabels(["KiCad Footprint", "Alias"])
@@ -66,7 +74,17 @@ class FootprintAliasDialog(QDialog):
         self._table.setItem(row, 0, QTableWidgetItem(kicad))
         self._table.setItem(row, 1, QTableWidgetItem(alias))
 
+    def _filter_rows(self, text: str):
+        needle = text.lower()
+        for r in range(self._table.rowCount()):
+            kicad_item = self._table.item(r, 0)
+            alias_item = self._table.item(r, 1)
+            kicad = (kicad_item.text() if kicad_item else "").lower()
+            alias = (alias_item.text() if alias_item else "").lower()
+            self._table.setRowHidden(r, bool(needle) and needle not in kicad and needle not in alias)
+
     def _add_row(self):
+        self._search.clear()
         self._insert_row()
         self._table.scrollToBottom()
         self._table.setCurrentCell(self._table.rowCount() - 1, 0)
@@ -78,6 +96,7 @@ class FootprintAliasDialog(QDialog):
             self._table.removeRow(r)
 
     def _add_from_bom(self):
+        self._search.clear()
         existing = set()
         for r in range(self._table.rowCount()):
             item = self._table.item(r, 0)
