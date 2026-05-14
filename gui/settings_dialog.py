@@ -8,6 +8,7 @@ from PyQt6.QtGui import QColor
 from PyQt6.QtCore import Qt
 
 from gui.workers import TestApiWorker
+from core.config_manager import EXPORT_OFF_BY_DEFAULT
 
 
 # ── color utilities ──────────────────────────────────────────────────────────
@@ -68,12 +69,13 @@ class _StatusLabel(QLabel):
 # ── main dialog ──────────────────────────────────────────────────────────────
 
 _PRESETS = [
-    ("Olive Green",  "4F6228"),
-    ("Steel Blue",   "4472C4"),
-    ("Dark Teal",    "1F7391"),
+    ("Green",        "70AD47"),
+    ("Blue",         "5B9BD5"),
     ("Burgundy",     "843C0C"),
     ("Purple",       "4B3080"),
     ("Charcoal",     "404040"),
+    ("Cardinal",     "C8102E"),
+    ("Gold",         "F1BE48"),
 ]
 
 
@@ -174,7 +176,7 @@ class SettingsDialog(QDialog):
         layout.addWidget(proj_grp)
 
         # ── header color ──────────────────────────────────────────────────────
-        current_color = exp.get("header_color", "4F6228")
+        current_color = exp.get("header_color", "70AD47")
 
         style_grp = QGroupBox("Table Style")
         grp_layout = QVBoxLayout(style_grp)
@@ -210,15 +212,17 @@ class SettingsDialog(QDialog):
         grid.addWidget(QLabel("<b>Show</b>"),    0, 1, Qt.AlignmentFlag.AlignCenter)
         grid.addWidget(QLabel("<b>Export</b>"),  0, 2, Qt.AlignmentFlag.AlignCenter)
 
+
         self._col_checks: dict[str, tuple[QCheckBox, QCheckBox]] = {}
         for row_i, (key, label) in enumerate(TABLE_COLUMNS, 1):
             if key == "status":
                 continue
-            defaults = col_cfg.get(key, {"show": True, "export": True})
+            default_export = key not in EXPORT_OFF_BY_DEFAULT
+            defaults = col_cfg.get(key, {"show": True, "export": default_export})
             show_cb   = QCheckBox()
             export_cb = QCheckBox()
-            show_cb.setChecked(defaults.get("show",   True))
-            export_cb.setChecked(defaults.get("export", True))
+            show_cb.setChecked(defaults.get("show", True))
+            export_cb.setChecked(defaults.get("export", default_export))
             grid.addWidget(QLabel(label), row_i, 0)
             grid.addWidget(show_cb,   row_i, 1, Qt.AlignmentFlag.AlignCenter)
             grid.addWidget(export_cb, row_i, 2, Qt.AlignmentFlag.AlignCenter)

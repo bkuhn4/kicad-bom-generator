@@ -4,14 +4,14 @@ from pathlib import Path
 
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QToolBar, QStatusBar,
-    QFileDialog, QMessageBox, QTableView, QTableWidget, QTableWidgetItem,
+    QFileDialog, QMessageBox, QTableWidget, QTableWidgetItem,
     QHeaderView, QMenu, QToolButton, QPushButton,
-    QSizePolicy, QLabel, QLineEdit,
+    QSizePolicy, QLabel, QLineEdit, QDialog, QFormLayout,
 )
 from PyQt6.QtCore import QModelIndex, QUrl, Qt
 from PyQt6.QtGui import QAction, QDesktopServices
 
-from core.config_manager import load_config, save_config
+from core.config_manager import load_config, save_config, EXPORT_OFF_BY_DEFAULT
 from core.database import init_db, lookup_part, save_part, save_lcsc_pn
 from core.bom_parser import parse_bom, expand_refs_string, _sort_refs, _compress_refs
 from core.exporter import export_bom, export_csv, EXPORT_COLUMNS
@@ -19,13 +19,53 @@ from core.footprint_map import load_footprint_map, save_footprint_map
 from core.status import recalc_status
 from api.digikey import DigiKeyClient
 from api.mouser import MouserClient
-from gui.bom_table import BomTableModel, PackagingDelegate, COLUMNS
+from gui.bom_table import BomTableModel, BomTableView, PackagingDelegate, COLUMNS
 from gui.search_dialog import SearchAssignDialog
 from gui.settings_dialog import SettingsDialog
 from gui.workers import FetchAllWorker
 
 _GITHUB_URL = "https://github.com/bkuhn4/kicad-bom-generator"
 _MAX_RECENT = 8
+
+
+class _ProjectInfoDialog(QDialog):
+    def __init__(self, project_name: str, revision: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Project Info")
+        self.setMinimumWidth(340)
+        self.skipped = False
+        self.project_name = project_name
+        self.revision = revision
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Enter project info for the export header:"))
+
+        form = QFormLayout()
+        self._name = QLineEdit(project_name)
+        self._rev  = QLineEdit(revision)
+        form.addRow("Project Name:", self._name)
+        form.addRow("Revision:",     self._rev)
+        layout.addLayout(form)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        skip_btn = QPushButton("Skip")
+        skip_btn.clicked.connect(self._skip)
+        export_btn = QPushButton("Export")
+        export_btn.setDefault(True)
+        export_btn.clicked.connect(self._export)
+        btn_row.addWidget(skip_btn)
+        btn_row.addWidget(export_btn)
+        layout.addLayout(btn_row)
+
+    def _skip(self):
+        self.skipped = True
+        self.reject()
+
+    def _export(self):
+        self.project_name = self._name.text().strip()
+        self.revision = self._rev.text().strip()
+        self.accept()
 
 
 class MainWindow(QMainWindow):
@@ -64,15 +104,15 @@ class MainWindow(QMainWindow):
         self.model.key_cell_edited.connect(self._on_key_cell_edited)
         self.model.footprint_edited.connect(self._on_footprint_edited)
 
-        self.view = QTableView()
+        self.view = BomTableView()
         self.view.setModel(self.model)
-        self.view.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows)
+        self.view.setSelectionBehavior(BomTableView.SelectionBehavior.SelectItems)
         self.view.setAlternatingRowColors(False)
         self.view.setEditTriggers(
-            QTableView.EditTrigger.DoubleClicked |
-            QTableView.EditTrigger.EditKeyPressed |
-            QTableView.EditTrigger.AnyKeyPressed |
-            QTableView.EditTrigger.SelectedClicked
+            BomTableView.EditTrigger.DoubleClicked |
+            BomTableView.EditTrigger.EditKeyPressed |
+            BomTableView.EditTrigger.AnyKeyPressed |
+            BomTableView.EditTrigger.SelectedClicked
         )
         self.view.clicked.connect(self._on_single_click)
         self.view.doubleClicked.connect(self._on_double_click)
@@ -166,6 +206,7 @@ class MainWindow(QMainWindow):
         self._use_fp_action.toggled.connect(self._on_use_footprint_aliases_toggled)
         sm.addAction(self._use_fp_action)
         self._add_action(sm, "Edit Footprint Aliases…", self._open_footprint_aliases)
+        self._add_action(sm, "Edit LCSC Part Numbers…", self._open_lcsc_pns)
 
         hm = mb.addMenu("Help")
         about_act = QAction("About / GitHub", self)
@@ -178,7 +219,7 @@ class MainWindow(QMainWindow):
         self.addToolBar(tb)
 
         self._import_btn = QToolButton()
-        self._import_btn.setText("Import BOM")
+        self._import_btn.setText("Import CSV")
         self._import_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
         self._import_btn.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
 
@@ -192,7 +233,6 @@ class MainWindow(QMainWindow):
         self._recent_sep = self._import_menu.addSeparator()
 
         self._import_btn.setMenu(self._import_menu)
-        self._import_btn.setDefaultAction(browse_act)
         self._import_btn.clicked.connect(self._browse_bom)
 
         tb.addWidget(self._import_btn)
@@ -572,6 +612,20 @@ class MainWindow(QMainWindow):
         if not rows:
             QMessageBox.information(self, "No Data", "Import a BOM first.")
             return
+
+        exp = self.config.get("export", {})
+        project_name = exp.get("project_name", "")
+        revision = exp.get("revision", "")
+
+        if not project_name or not revision:
+            dlg = _ProjectInfoDialog(project_name, revision, self)
+            result = dlg.exec()
+            if result == QDialog.DialogCode.Rejected and dlg.skipped:
+                pass  # export with whatever is already in config
+            elif result == QDialog.DialogCode.Accepted:
+                project_name = dlg.project_name
+                revision = dlg.revision
+
         path, _ = QFileDialog.getSaveFileName(
             self, "Export BOM to Excel",
             str(Path.home() / "bom_export.xlsx"),
@@ -580,13 +634,12 @@ class MainWindow(QMainWindow):
         if not path:
             return
         try:
-            exp = self.config.get("export", {})
             export_bom(
                 rows, path,
-                header_color=exp.get("header_color", "4F6228"),
+                header_color=exp.get("header_color", "70AD47"),
                 columns=self._get_export_columns(),
-                project_name=exp.get("project_name", ""),
-                revision=exp.get("revision", ""),
+                project_name=project_name,
+                revision=revision,
                 show_title=exp.get("show_title", True),
                 show_footer=exp.get("show_footer", True),
             )
@@ -608,6 +661,22 @@ class MainWindow(QMainWindow):
             if new_compress != old_compress:
                 self._toggle_compress_references(new_compress)
             self._status.showMessage("Settings saved.")
+
+    def _open_lcsc_pns(self):
+        from gui.lcsc_pn_dialog import LcscPnDialog
+        from core.database import get_all_lcsc_assignments
+        dlg = LcscPnDialog(parent=self)
+        if dlg.exec() == LcscPnDialog.DialogCode.Accepted:
+            lcsc_map = {
+                (r["value"], r["footprint"]): r["lcsc_pn"]
+                for r in get_all_lcsc_assignments()
+            }
+            for i, row in enumerate(self.model.get_all_rows()):
+                key = (row.get("value", ""), row.get("footprint", ""))
+                new_lcsc = lcsc_map.get(key, "")
+                if new_lcsc != row.get("lcsc_pn", ""):
+                    self.model.update_row(i, {"lcsc_pn": new_lcsc})
+            self._status.showMessage("LCSC part numbers saved.")
 
     def _open_footprint_aliases(self):
         from gui.footprint_dialog import FootprintAliasDialog
@@ -715,7 +784,7 @@ class MainWindow(QMainWindow):
                 continue
             if hdr.isSectionHidden(li):
                 continue
-            if not col_cfg.get(key, {}).get("export", True):
+            if not col_cfg.get(key, {}).get("export", key not in EXPORT_OFF_BY_DEFAULT):
                 continue
             result.append((key, label))
         return result or EXPORT_COLUMNS

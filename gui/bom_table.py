@@ -1,6 +1,6 @@
 from PyQt6.QtCore import Qt, QAbstractTableModel, QModelIndex, pyqtSignal, QTimer
 from PyQt6.QtGui import QColor, QBrush
-from PyQt6.QtWidgets import QComboBox, QStyledItemDelegate
+from PyQt6.QtWidgets import QApplication, QComboBox, QStyledItemDelegate, QTableView
 
 PACKAGING_OPTIONS = ["Cut Tape", "Tape & Reel", "Digi-Reel/MouseReel"]
 
@@ -144,6 +144,51 @@ class BomTableModel(QAbstractTableModel):
 
     def get_all_rows(self) -> list[dict]:
         return [dict(r) for r in self._rows]
+
+
+class BomTableView(QTableView):
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_V and event.modifiers() == Qt.KeyboardModifier.ControlModifier:
+            self._paste()
+            return
+        super().keyPressEvent(event)
+
+    def _paste(self):
+        clipboard = QApplication.clipboard()
+        model = self.model()
+        hdr = self.horizontalHeader()
+        if clipboard is None or model is None or hdr is None:
+            return
+
+        text = clipboard.text()
+        if not text:
+            return
+
+        clipboard_rows = [row.split('\t') for row in text.splitlines()]
+
+        selected = self.selectedIndexes()
+        if not selected:
+            return
+
+        min_row = min(idx.row() for idx in selected)
+        min_visual_col = min(hdr.visualIndex(idx.column()) for idx in selected)
+
+        for clip_row_i, clip_row in enumerate(clipboard_rows):
+            target_row = min_row + clip_row_i
+            if target_row >= model.rowCount():
+                break
+
+            clip_col_i = 0
+            for visual_col in range(min_visual_col, hdr.count()):
+                if clip_col_i >= len(clip_row):
+                    break
+                logical_col = hdr.logicalIndex(visual_col)
+                if hdr.isSectionHidden(logical_col):
+                    continue
+                idx = model.index(target_row, logical_col)
+                if model.flags(idx) & Qt.ItemFlag.ItemIsEditable:
+                    model.setData(idx, clip_row[clip_col_i])
+                clip_col_i += 1
 
 
 class PackagingDelegate(QStyledItemDelegate):

@@ -9,19 +9,25 @@ _ALL_COLUMN_KEYS = [
     "mouser_pn", "lcsc_pn", "notes",
 ]
 
+# Columns that should not be exported by default
+EXPORT_OFF_BY_DEFAULT = {"value", "stock", "packaging"}
+
+def _col_default(key: str) -> dict:
+    return {"show": True, "export": key not in EXPORT_OFF_BY_DEFAULT}
+
 DEFAULT_CONFIG = {
     "digikey": {"client_id": "", "client_secret": "", "sandbox": False},
     "mouser": {"api_key": ""},
     "default_packaging": "Cut Tape",
     "low_stock_threshold": 10,
     "export": {
-        "header_color": "4F6228",
+        "header_color": "70AD47",
         "project_name": "",
         "revision": "",
         "show_title": True,
         "show_footer": True,
     },
-    "columns": {k: {"show": True, "export": True} for k in _ALL_COLUMN_KEYS},
+    "columns": {k: _col_default(k) for k in _ALL_COLUMN_KEYS},
     "recent_files": [],
     "use_footprint_aliases": True,
     "compress_references": True,
@@ -40,7 +46,11 @@ def load_config() -> dict:
                 cfg[k].setdefault(sub, val)
         # back-fill any new column keys added after initial setup
         for col_key in _ALL_COLUMN_KEYS:
-            cfg["columns"].setdefault(col_key, {"show": True, "export": True})
+            cfg["columns"].setdefault(col_key, _col_default(col_key))
+        # migrate: force export=False for columns that should be off by default
+        for col_key in EXPORT_OFF_BY_DEFAULT:
+            if col_key in cfg["columns"]:
+                cfg["columns"][col_key]["export"] = False
         return cfg
     return DEFAULT_CONFIG.copy()
 

@@ -74,6 +74,26 @@ def save_part(value: str, footprint: str, data: dict):
         conn.commit()
 
 
+def get_all_lcsc_assignments() -> list[dict]:
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT value, footprint, lcsc_pn FROM part_mappings "
+            "WHERE lcsc_pn IS NOT NULL AND lcsc_pn != '' "
+            "ORDER BY value, footprint"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def clear_lcsc_pn(value: str, footprint: str):
+    now = datetime.now().isoformat()
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE part_mappings SET lcsc_pn='', last_updated=? WHERE value=? AND footprint=?",
+            (now, value, footprint),
+        )
+        conn.commit()
+
+
 def save_lcsc_pn(value: str, footprint: str, lcsc_pn: str):
     now = datetime.now().isoformat()
     with _connect() as conn:
