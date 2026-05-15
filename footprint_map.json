@@ -5,5 +5,10 @@
   "LED_0603_1608Metric_Pad1.05x0.95mm_HandSolder": "D0603",
   "L_0603_1608Metric_Pad1.05x0.95mm_HandSolder": "L0603",
   "QFN-24-1EP_4x4mm_P0.5mm_EP2.5x2.5mm": "QFN-24-1EP",
-  "QFN-20-1EP_4x4mm_P0.5mm_EP2.7x2.7mm": "QFN-20-1EP"
+  "QFN-20-1EP_4x4mm_P0.5mm_EP2.7x2.7mm": "QFN-20-1EP",
+  "L_0402_1005Metric_Pad0.77x0.64mm_HandSolder": "L0402",
+  "R_0402_1005Metric_Pad0.72x0.64mm_HandSolder": "R0402",
+  "R_0603_1608Metric_Pad0.98x0.95mm_HandSolder": "R0603",
+  "SOIC-8-1EP_3.9x4.9mm_P1.27mm_EP2.41x3.3mm": "SOIC-8-1EP",
+  "LQFP-64_10x10mm_P0.5mm": "LQFP-64"
 }

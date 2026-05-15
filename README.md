@@ -53,15 +53,20 @@ python main.py
 
 ### DigiKey
 
-1. Create a production app at [developer.digikey.com](https://developer.digikey.com) and note your **Client ID** and **Client Secret**.
-2. Open **Settings → API Credentials & Preferences** and enter them.
-3. Click **Test Connection** — the app will open a browser for OAuth authorization. After logging in, copy the full redirect URL from the address bar and paste it into the dialog. The token is saved locally and refreshes automatically.
+1. Go to [developer.digikey.com](https://developer.digikey.com) and create an account if you don't have one.
+2. In the developer portal, create a new **Production App**.
+3. Set the **OAuth Callback URL** to exactly: `https://localhost:8139/digikey_callback`
+4. Under API selection, ensure you select the appropriate Product Information/Search APIs.
+5. Note your **Client ID** and **Client Secret**.
+6. Open **Settings → API Credentials & Preferences** in the app and enter them.
+7. Click **Test Connection** — the app will open a browser for OAuth authorization. After logging in, copy the full redirect URL from the address bar and paste it into the dialog. The token is saved locally and refreshes automatically.
 
 ### Mouser
 
-1. Generate an API key at [mouser.com/api](https://www.mouser.com/api-hub/).
-2. Enter it in **Settings → API Credentials & Preferences → Mouser API**.
-3. Click **Test Connection** to verify.
+1. Go to the [Mouser API Hub](https://www.mouser.com/api-hub/) (sign in to your Mouser account).
+2. Register for the **Search API** to generate your API key.
+3. Enter it in **Settings → API Credentials & Preferences → Mouser API**.
+4. Click **Test Connection** to verify.
 
 API credentials are stored in `~/.kicad_bom_enhancer/config.json` and are never committed to the repo.
 
